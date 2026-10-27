@@ -1,0 +1,5 @@
+torch>=2.0
+numpy
+mrcfile        # tutorial: read particle files to measure a noise spectrum
+matplotlib     # tutorial: plots
+# MDAnalysis   # only for load_bank, to build a bank from your own PDB files

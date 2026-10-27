@@ -1,0 +1,15 @@
+cff-version: 1.2.0
+message: "If you use v3, please cite the paper below."
+type: software
+license: MIT
+preferred-citation:
+  type: conference-paper
+  title: "A quantitative approach to characterise model misspecification in cryo-EM"
+  authors:
+    - family-names: Zafranas
+      given-names: Alexandros
+    - family-names: Covino
+      given-names: Roberto
+  conference:
+    name: "NeurIPS 2026 Workshop"
+  year: 2026
