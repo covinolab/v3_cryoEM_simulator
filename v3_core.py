@@ -182,11 +182,10 @@ KNOWN SIMPLIFICATIONS AND CHOICES TO BE AWARE OF
 - The coloured noise uses the full 2-D average power spectrum of the particles,
   not its radial average (Part 5).
 - Each image's random point clouds for clutter are fixed by its own seed. But
-  the noise fields, and the random radii of shell-shaped clouds, come from one
-  random stream per batch, seeded by the first image's seed. In a different
-  batch, the same theta row therefore gets a new noise draw (at the paper's
-  SNRs, a different-looking image with the same settings) and slightly
-  different shell-shaped clutter (see render).
+  the noise fields, and the random radii of shell-shaped clouds, are drawn
+  fresh at every render (see render). Rendering the same theta twice therefore
+  gives two images with the same settings, a new noise draw (at the paper's
+  SNRs, a different-looking image) and slightly different shell-shaped clutter.
 - The per-dataset noise spectrum is read from a file. If that file is missing,
   the code quietly falls back to an average spectrum, then to a simple formula
   (see Part 11).
@@ -1065,8 +1064,8 @@ Slot = namedtuple("Slot", "name size dtype transform group doc")
 THETA_LAYOUT: tuple[Slot, ...] = (
     Slot("seed", 1, "int", "seed", "meta",
          "A whole number. It regenerates this image's fixed random point cloud for "
-         "clutter (see derive_u). The noise fields and the shell radii come from one "
-         "random stream per batch, seeded by the FIRST image's seed (see render)."),
+         "clutter (see derive_u). The noise fields and the shell radii are drawn fresh "
+         "at every render (see render)."),
     Slot("conformer_idx", 2, "int", "index", "base",
          "Which structure from the bank to show: (conformer number, representative "
          "number)."),
@@ -2623,7 +2622,7 @@ def render(
     bank: torch.Tensor,
     cfg: RenderShape,
     *,
-    rng_seed="theta",
+    rng_seed=None,
 ) -> torch.Tensor:
     """Make the images: theta (B, 156) -> images (B, N, N). The five stages of the paper's SI S3.
 
@@ -2631,27 +2630,36 @@ def render(
         theta     (B, 156) image settings, from sample_theta (or edited by hand).
         bank      the conformer bank (M, R, 3, A).
         cfg       the RenderShape: box size, pixel size, where the noise spectrum comes from.
-        rng_seed  how PyTorch's global random stream is seeded before drawing the noise fields
-                  and the radii of shell-shaped clutter clouds:
-                    "theta"    (default) from the FIRST image's seed, so the same theta batch
-                               always gives the same images;
-                    "ambient"  leave the stream as it is (you seed it yourself);
-                    a number   seed it with that number.
-                  The stream is shared by the whole batch, so one image's noise (like the shell
-                  radii of its clutter) depends on the other images in its batch. Note that
-                  seeding resets PyTorch's global random stream, which other code may use too.
+        rng_seed  where the random numbers for the noise fields and the radii of shell-shaped
+                  clutter clouds come from:
+                    None       (default) PyTorch's global random stream, as it is: every call
+                               draws fresh noise, so the same theta gives images with the same
+                               settings and different noise. Call torch.manual_seed once at the
+                               start to make a whole run repeatable;
+                    "ambient"  the same as None;
+                    "theta"    a stream seeded from the FIRST image's seed, so the same theta
+                               batch always gives the same images;
+                    a number   a stream seeded with that number.
+                  With "theta" or a number, PyTorch's global random stream is saved before and
+                  restored after, so other code that uses it is not affected.
     Output
         (B, N, N) images, each with mean 0 and standard deviation 1.
     """
+    if rng_seed is None or rng_seed == "ambient":
+        return _render(theta, bank, cfg)
+    seed = (int(unpack_theta(theta, cfg.n_slots)["seed"].reshape(-1)[0].item()) if rng_seed == "theta"
+            else int(rng_seed))
+    with torch.random.fork_rng(devices=list(range(torch.cuda.device_count()))):
+        torch.manual_seed(seed % (1 << 63))
+        return _render(theta, bank, cfg)
+
+
+def _render(theta: torch.Tensor, bank: torch.Tensor, cfg: RenderShape) -> torch.Tensor:
+    """The body of render. Its random numbers come from PyTorch's global stream as render left it."""
     models = as_4d(bank)
     f = unpack_theta(theta, cfg.n_slots)
     B = theta.shape[0]
     dev = theta.device
-
-    if rng_seed == "theta":
-        torch.manual_seed(int(f["seed"].reshape(-1)[0].detach().item()) % (1 << 63))
-    elif rng_seed is not None and rng_seed != "ambient":
-        torch.manual_seed(int(rng_seed))
 
     num_pixels = torch.tensor(float(cfg.num_pixels), dtype=torch.float32, device=dev)
     pixel_size = torch.tensor(float(cfg.pixel_size), dtype=torch.float32, device=dev)
@@ -2744,7 +2752,7 @@ def _edge_band(img: torch.Tensor, f: dict, cfg: RenderShape) -> torch.Tensor:
 
 
 def render_from_phi(phi: torch.Tensor, n: int, seed: int, bank: torch.Tensor,
-                    cfg: RenderShape, *, rng_seed="theta"):
+                    cfg: RenderShape, *, rng_seed=None):
     """The whole chain in one call: phi -> theta -> images. Returns (images, theta).
 
     Derivatives flow from the images back to phi.
